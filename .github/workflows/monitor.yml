@@ -10,12 +10,12 @@ permissions:
 
 concurrency:
   group: tpc-monitor
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
 
@@ -28,14 +28,11 @@ jobs:
           pip install playwright
           playwright install chromium --with-deps
 
-      - name: Monitor loop
+      - name: Check supporter count
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          for i in $(seq 1 70); do
-            echo "=== Check #$i at $(date -u) ==="
-
-            python3 << 'PYEOF'
+          python3 << 'PYEOF'
           import re, os, json, subprocess
           from datetime import datetime, timezone
           from playwright.sync_api import sync_playwright
@@ -63,7 +60,6 @@ jobs:
               match = re.search(r">([\d.]{3,})<.*?STEUNBETUIGINGEN", html, re.IGNORECASE | re.DOTALL)
           if not match:
               print("ERROR: Could not find counter")
-              # Don't exit, just skip this check
           else:
               raw = match.group(1)
               current = int(raw.replace(".", ""))
@@ -71,8 +67,12 @@ jobs:
 
               data = {"count": None, "history": []}
               if os.path.exists("data.json"):
-                  with open("data.json") as f:
-                      data = json.load(f)
+                  try:
+                      with open("data.json") as f:
+                          data = json.load(f)
+                  except (json.JSONDecodeError, ValueError) as e:
+                      print(f"WARNING: data.json was corrupted ({e}), resetting")
+                      data = {"count": None, "history": []}
 
               previous = data.get("count")
               now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -113,20 +113,10 @@ jobs:
               print("Data saved.")
           PYEOF
 
-            # Commit after each check
-            git config user.name "TPC Monitor Bot"
-            git config user.email "bot@users.noreply.github.com"
-            git add data.json
-            git diff --cached --quiet || git commit -m "Update count $(date -u +'%Y-%m-%d %H:%M UTC')"
-            git push || true
-
-            # Wait 5 minutes before next check (skip wait on last iteration)
-            if [ $i -lt 70 ]; then
-              echo "Sleeping 5 minutes..."
-              sleep 300
-              # Pull any remote changes before next check
-              git pull --rebase || true
-            fi
-          done
-          echo "Loop complete. Job will restart via schedule or manually."
-
+      - name: Commit data
+        run: |
+          git config user.name "TPC Monitor Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data.json
+          git diff --cached --quiet || git commit -m "Update count $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git push || true
