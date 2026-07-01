@@ -132,3 +132,15 @@ jobs:
           done
           echo "Loop complete."
 
+      - name: Restart loop
+        if: always()
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: token $PAT_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/libalovabara4466/kirby-monitor-/actions/workflows/monitor.yml/dispatches \
+            -d '{"ref":"main"}'
+          echo "Next run triggered."
+
