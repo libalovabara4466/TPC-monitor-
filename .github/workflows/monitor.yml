@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: tpc-monitor
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -23,11 +28,14 @@ jobs:
           pip install playwright
           playwright install chromium --with-deps
 
-      - name: Fetch page and check count
+      - name: Monitor loop
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
-          python3 << 'PYEOF'
+          for i in $(seq 1 70); do
+            echo "=== Check #$i at $(date -u) ==="
+
+            python3 << 'PYEOF'
           import re, os, json, subprocess
           from datetime import datetime, timezone
           from playwright.sync_api import sync_playwright
@@ -54,70 +62,71 @@ jobs:
           if not match:
               match = re.search(r">([\d.]{3,})<.*?STEUNBETUIGINGEN", html, re.IGNORECASE | re.DOTALL)
           if not match:
-              for i, line in enumerate(html.split('\n')):
-                  if 'steun' in line.lower():
-                      print(f"Line {i}: {line.strip()[:200]}")
-              exit(1)
-
-          raw = match.group(1)
-          current = int(raw.replace(".", ""))
-          print(f"Found count: {current:,}")
-
-          data = {"count": None, "history": []}
-          if os.path.exists("data.json"):
-              with open("data.json") as f:
-                  data = json.load(f)
-
-          previous = data.get("count")
-          now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-          print(f"[{now}] Current: {current:,} | Previous: {previous}")
-
-          data.setdefault("history", [])
-          data["history"].append({"time": now, "count": current})
-          data["history"] = data["history"][-500:]
-
-          # Build message
-          if previous is not None and current != previous:
-              diff = current - previous
-              direction = "📈 UP" if diff > 0 else "📉 DOWN"
-              msg = f"{direction} {abs(diff):,} | Steunbetuigingen: {current:,} (was {previous:,}) | {now}"
+              print("ERROR: Could not find counter")
+              # Don't exit, just skip this check
           else:
-              msg = f"Steunbetuigingen: {current:,} | No change | {now}"
+              raw = match.group(1)
+              current = int(raw.replace(".", ""))
+              print(f"Found count: {current:,}")
 
-          print(msg)
+              data = {"count": None, "history": []}
+              if os.path.exists("data.json"):
+                  with open("data.json") as f:
+                      data = json.load(f)
 
-          # Send to Discord using curl
-          webhook = os.environ.get("DISCORD_WEBHOOK", "")
-          if webhook:
-              payload = json.dumps({"content": msg})
-              result = subprocess.run(
-                  ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
-                   "-H", "Content-Type: application/json",
-                   "-d", payload,
-                   webhook],
-                  capture_output=True, text=True, timeout=15
-              )
-              status = result.stdout.strip()
-              if status in ("200", "204"):
-                  print(f"Discord sent! (HTTP {status})")
+              previous = data.get("count")
+              now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+              print(f"[{now}] Current: {current:,} | Previous: {previous}")
+
+              data.setdefault("history", [])
+              data["history"].append({"time": now, "count": current})
+              data["history"] = data["history"][-500:]
+
+              if previous is not None and current != previous:
+                  diff = current - previous
+                  direction = "📈 UP" if diff > 0 else "📉 DOWN"
+                  msg = f"{direction} {abs(diff):,} | Steunbetuigingen: {current:,} (was {previous:,}) | {now}"
               else:
-                  print(f"Discord failed (HTTP {status})")
-                  print(f"Response: {result.stderr}")
-          else:
-              print("No DISCORD_WEBHOOK set")
+                  msg = f"Steunbetuigingen: {current:,} | No change | {now}"
 
-          # Save data regardless of notification success
-          data["count"] = current
-          with open("data.json", "w") as f:
-              json.dump(data, f, indent=2)
-          print("Data saved.")
+              print(msg)
+
+              webhook = os.environ.get("DISCORD_WEBHOOK", "")
+              if webhook:
+                  payload = json.dumps({"content": msg})
+                  result = subprocess.run(
+                      ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                       "-H", "Content-Type: application/json",
+                       "-d", payload,
+                       webhook],
+                      capture_output=True, text=True, timeout=15
+                  )
+                  status = result.stdout.strip()
+                  if status in ("200", "204"):
+                      print(f"Discord sent! (HTTP {status})")
+                  else:
+                      print(f"Discord failed (HTTP {status})")
+
+              data["count"] = current
+              with open("data.json", "w") as f:
+                  json.dump(data, f, indent=2)
+              print("Data saved.")
           PYEOF
 
-      - name: Commit updated data
-        run: |
-          git config user.name "TPC Monitor Bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add data.json
-          git diff --cached --quiet || git commit -m "Update count $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push
+            # Commit after each check
+            git config user.name "TPC Monitor Bot"
+            git config user.email "bot@users.noreply.github.com"
+            git add data.json
+            git diff --cached --quiet || git commit -m "Update count $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push || true
+
+            # Wait 5 minutes before next check (skip wait on last iteration)
+            if [ $i -lt 70 ]; then
+              echo "Sleeping 5 minutes..."
+              sleep 300
+              # Pull any remote changes before next check
+              git pull --rebase || true
+            fi
+          done
+          echo "Loop complete. Job will restart via schedule or manually."
 
