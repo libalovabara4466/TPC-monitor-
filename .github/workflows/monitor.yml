@@ -25,11 +25,10 @@ jobs:
 
       - name: Fetch page and check count
         env:
-          TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          TEAMS_WEBHOOK: ${{ secrets.TEAMS_WEBHOOK }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHANGE_THRESHOLD: "1"
         run: |
           python3 << 'PYEOF'
           import re, os, json
@@ -74,7 +73,6 @@ jobs:
                   data = json.load(f)
 
           previous = data.get("count")
-          threshold = int(os.environ.get("CHANGE_THRESHOLD", "1"))
           now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
           print(f"[{now}] Current: {current:,} | Previous: {previous}")
 
@@ -82,11 +80,27 @@ jobs:
           data["history"].append({"time": now, "count": current})
           data["history"] = data["history"][-500:]
 
-          def send_teams(message):
-              url = os.environ.get("TEAMS_WEBHOOK")
-              if not url:
-                  print("No TEAMS_WEBHOOK set, skipping")
-                  return
+          # Build the message
+          if previous is not None and current != previous:
+              diff = current - previous
+              direction = "📈 UP" if diff > 0 else "📉 DOWN"
+              msg = f"{direction} {abs(diff):,} | Steunbetuigingen: {current:,} (was {previous:,}) | {now}"
+          else:
+              msg = f"Steunbetuigingen: {current:,} | No change | {now}"
+
+          print(msg)
+
+          # Always send to Discord
+          webhook = os.environ.get("DISCORD_WEBHOOK")
+          if webhook:
+              payload = json.dumps({"content": msg}).encode("utf-8")
+              req = urllib.request.Request(webhook, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+              urllib.request.urlopen(req, timeout=15)
+              print("Discord sent")
+
+          # Always send to Teams
+          teams_url = os.environ.get("TEAMS_WEBHOOK")
+          if teams_url:
               payload = json.dumps({
                   "type": "message",
                   "attachments": [{
@@ -95,52 +109,23 @@ jobs:
                           "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                           "type": "AdaptiveCard",
                           "version": "1.4",
-                          "body": [{
-                              "type": "TextBlock",
-                              "text": message,
-                              "wrap": True,
-                              "size": "Medium"
-                          }]
+                          "body": [{"type": "TextBlock", "text": msg, "wrap": True, "size": "Medium"}]
                       }
                   }]
               }).encode("utf-8")
-              req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+              req = urllib.request.Request(teams_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
               urllib.request.urlopen(req, timeout=15)
-              print("Teams notification sent!")
+              print("Teams sent")
 
-          def send_discord(message):
-              url = os.environ.get("DISCORD_WEBHOOK")
-              if not url:
-                  return
-              payload = json.dumps({"content": message}).encode("utf-8")
-              req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-              urllib.request.urlopen(req, timeout=15)
-              print("Discord sent")
-
-          def send_telegram(message):
-              token = os.environ.get("TELEGRAM_TOKEN")
-              chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-              if not token or not chat_id:
-                  return
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
-              payload = json.dumps({"chat_id": chat_id, "text": message}).encode("utf-8")
+          # Always send to Telegram
+          tg_token = os.environ.get("TELEGRAM_TOKEN")
+          tg_chat = os.environ.get("TELEGRAM_CHAT_ID")
+          if tg_token and tg_chat:
+              url = f"https://api.telegram.org/bot{tg_token}/sendMessage"
+              payload = json.dumps({"chat_id": tg_chat, "text": msg}).encode("utf-8")
               req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
               urllib.request.urlopen(req, timeout=15)
               print("Telegram sent")
-
-          if previous is not None:
-              diff = current - previous
-              if abs(diff) >= threshold:
-                  direction = "📈 UP" if diff > 0 else "📉 DOWN"
-                  msg = f"{direction} by {abs(diff):,}!  \\nTPC AppLovin steunbetuigingen: {previous:,} → {current:,}  \\nTime: {now}  \\nhttps://theprivacycollective.nl/applovin-home/"
-                  print(msg)
-                  send_teams(msg)
-                  send_discord(msg)
-                  send_telegram(msg)
-              else:
-                  print(f"Change of {diff:,} below threshold ({threshold})")
-          else:
-              print(f"First run. Baseline: {current:,}")
 
           data["count"] = current
           with open("data.json", "w") as f:
